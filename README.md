@@ -1,6 +1,6 @@
 # Wetter — Minecraft Server Dashboard
 
-Read-only Paper plugin and static public dashboard. The plugin exposes server status and reads camera metadata from SecurityCams v3 when that plugin is installed.
+Read-only Paper plugin and static public dashboard. The plugin reads real camera metadata from SecurityCams v3 and can optionally embed an externally produced browser-playable video stream for each camera.
 
 ## Requirements
 - Paper 26.3
@@ -14,20 +14,30 @@ mvn clean package
 ```
 The JAR is written to `target/wetter-0.2.0.jar`. Copy it into Paper's `plugins/` directory and restart. Install SecurityCams separately as usual.
 
-## API
-Default bind: `127.0.0.1:8765`.
+## Camera integration
+`GET /api/cameras` reads SecurityCams' actual internal `CamStorage` list using a soft dependency and reflection. It returns each camera's ID, name, owner and world. It does not expose exact block coordinates or provide camera-control endpoints.
+
+### Important: SecurityCams does not output browser video
+SecurityCams' documented live mode moves a Minecraft player into a camera view inside the Minecraft client. It does not document an HTTP, RTSP, HLS, WebRTC or browser-video output. The plugin therefore cannot directly supply a website video.
+
+For website live video, a separate capture pipeline is required:
+1. Run a dedicated Minecraft client/account that can watch the relevant SecurityCams camera.
+2. Capture that client window with OBS (or equivalent) and publish a browser-compatible stream (HLS or MP4/WebM; WebRTC needs a compatible player integration).
+3. Add the public HTTPS stream URL to `plugins/Wetter/config.yml` under `camera-streams`, keyed by the SecurityCams camera ID, for example:
+   ```yaml
+   camera-streams:
+     "1": "https://stream.example.net/camera-1/index.m3u8"
+   ```
+4. Restart Wetter and host the website files. The dashboard will display a player only for cameras with a configured HTTPS URL.
+
+The URL is public because visitors to a public website can inspect it. Do not put private stream credentials or OBS control tokens in this setting. Protect the stream separately at your streaming server/CDN if needed. HLS playback uses hls.js from jsDelivr where the browser lacks native HLS support.
+
+## API and hosting
+Default API bind: `127.0.0.1:8765`.
 - `GET /api/status`: player count, MOTD, server version, world weather and time.
-- `GET /api/cameras`: reads the actual SecurityCams camera list (ID, camera name, owner and world) through its internal `CamStorage` API.
+- `GET /api/cameras`: SecurityCams camera metadata and optional configured HTTPS stream URLs.
 
-The integration uses reflection and `softdepend: [SecurityCams]`, so Wetter can start if SecurityCams is absent. Camera metadata is read on the server thread. No player viewing controls or camera movement endpoints are exposed.
-
-## Important: browser live video
-SecurityCams v3's documented live mode is a Minecraft player-viewing session: a player connects to a camera and sees the view in their Minecraft client. Its documented feature set includes in-game live viewing and replaying saved recordings, but does not document an HTTP, RTSP, HLS, WebRTC or browser-video output. Therefore this adapter can list real cameras but **cannot display their live pictures in a website**.
-
-For an actual public live picture, a separate capture pipeline is needed: a dedicated Minecraft account/client joins the camera, its client window is captured (for example with OBS), and OBS publishes a secured stream (preferably WebRTC or HLS) that the website embeds. This requires a running Minecraft client and a streaming service/process; it cannot be achieved by installing only a Paper plugin. Do not expose a Minecraft account or stream-control token to the public website.
-
-## Website and public deployment
-Host `website/` as static files. Keep port 8765 private on localhost. Put the API behind an HTTPS reverse proxy, restrict it to GET/OPTIONS, and rate-limit it. Set `window.WETTER_API_BASE` in `website/config.js` if the API is on another origin.
+Host `website/` as static files. Keep port 8765 private. Put the API behind an HTTPS reverse proxy, restrict it to GET/OPTIONS, and rate-limit it. Set `window.WETTER_API_BASE` in `website/config.js` if the API is on another origin.
 
 ## Status
-Initial camera metadata adapter source is committed; it has not yet been compiled or tested against your exact server/plugin runtime. It is not a live-video implementation.
+The SecurityCams metadata adapter and optional external-stream display are implemented in source. This has not yet been compiled or tested against your live Paper/SecurityCams installation, and no video capture process is included: the external viewer + OBS stream must be set up separately.
