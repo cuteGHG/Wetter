@@ -1,0 +1,9 @@
+const base=(window.WETTER_API_BASE||"").replace(/\/$/,"");
+const $=id=>document.getElementById(id);
+const weatherLabel={clear:"☀️ Klar",rain:"🌧️ Regen",thunder:"⛈️ Gewitter"};
+async function get(path){const r=await fetch(base+path,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);return r.json()}
+function renderStatus(s){$("connection").textContent="● Verbunden";$("connection").className="pill ok";$("players").textContent=s.online+" / "+s.maxPlayers;$("motd").textContent=s.motd||"Minecraft-Server";$("version").textContent=s.serverVersion||"API verbunden";$("updated").textContent="Aktualisiert: "+new Date(s.sampledAt).toLocaleTimeString("de-DE");$("worlds").innerHTML=(s.worlds||[]).map(w=>'<article class="world"><strong>'+escapeHtml(w.name)+'</strong><div class="weather">'+(weatherLabel[w.weather]||"Unbekannt")+'</div><p class="muted">Weltzeit: '+Math.floor((w.timeTicks%24000)/1000)+' Uhr</p></article>').join("")||'<article class="world empty">Keine Welten gefunden.</article>'}
+function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+async function refresh(){try{renderStatus(await get("/api/status"))}catch(e){$("connection").textContent="● Nicht erreichbar";$("connection").className="pill bad";$("motd").textContent="API nicht erreichbar: "+e.message}}
+async function cameras(){try{const d=await get("/api/cameras");$("camera-state").textContent=d.integration==="connected"?"Live verbunden":"Nicht verbunden";$("cameras").textContent=d.cameras?.length?d.cameras.map(c=>c.name).join(" · "):d.message||"Noch keine echte Kameraquelle verbunden. Es werden bewusst keine Fake-Livebilder angezeigt."}catch(e){$("camera-state").textContent="API nicht erreichbar";$("cameras").textContent="Kamerastatus konnte nicht geladen werden."}}
+refresh();cameras();setInterval(refresh,5000);setInterval(cameras,15000);
