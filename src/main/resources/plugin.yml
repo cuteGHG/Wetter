@@ -1,0 +1,6 @@
+name: Wetter
+version: 0.1.0
+main: de.cuteghg.wetter.WetterPlugin
+api-version: '26.3'
+description: Read-only public server status and weather API for the Wetter dashboard.
+author: cuteGHG
