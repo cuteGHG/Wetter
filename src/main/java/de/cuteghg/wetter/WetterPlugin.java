@@ -135,10 +135,8 @@ public final class WetterPlugin extends JavaPlugin implements Listener, TabCompl
         ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, " ", List.of());
         for (int i = 0; i < 54; i++) inv.setItem(i, filler);
 
-        inv.setItem(4, item(Material.COMPASS, ChatColor.AQUA + "" + ChatColor.BOLD + "SERVERÜBERSICHT",
-            List.of(ChatColor.GRAY + "Spieler: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size() + "/" + Bukkit.getMaxPlayers(),
-                    ChatColor.GRAY + "Welt: " + ChatColor.WHITE + (player.getWorld() == null ? "—" : player.getWorld().getName()),
-                    ChatColor.DARK_GRAY + "Aktualisiert beim Öffnen")));
+        inv.setItem(4, item(Material.PLAYER_HEAD, ChatColor.GREEN + "" + ChatColor.BOLD + "ONLINE-SPIELER",
+            List.of(ChatColor.GRAY + "Gerade online: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size() + "/" + Bukkit.getMaxPlayers())));
         World world = player.getWorld();
         String weather = world.hasStorm() ? (world.isThundering() ? "Gewitter" : "Regen") : "Klar";
         Material weatherIcon = world.isThundering() ? Material.LIGHTNING_ROD : world.hasStorm() ? Material.WATER_BUCKET : Material.SUNFLOWER;
@@ -148,10 +146,6 @@ public final class WetterPlugin extends JavaPlugin implements Listener, TabCompl
         int hour = (int)(ticks / 1000L), minute = (int)((ticks % 1000L) * 60L / 1000L);
         inv.setItem(13, item(Material.CLOCK, ChatColor.GOLD + "UHRZEIT",
             List.of(ChatColor.GRAY + "Weltzeit: " + ChatColor.WHITE + String.format("%02d:%02d", hour, minute))));
-        inv.setItem(15, item(Material.PLAYER_HEAD, ChatColor.GREEN + "ONLINE-SPIELER",
-            List.of(ChatColor.GRAY + "Gerade online: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size())));
-        inv.setItem(17, item(Material.CHEST, ChatColor.AQUA + "ÖFFENTLICHE KAMERAS",
-            List.of(ChatColor.GRAY + "Verfügbar: " + ChatColor.WHITE + all.size())));
         Map<Integer, CameraEntry> slots = new HashMap<>();
         int start = page * CAMERA_SLOTS.length;
         for (int i = 0; i < CAMERA_SLOTS.length && start + i < all.size(); i++) {
