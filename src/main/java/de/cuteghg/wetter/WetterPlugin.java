@@ -4,12 +4,16 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -51,15 +55,53 @@ public final class WetterPlugin extends JavaPlugin {
         ex.getResponseHeaders().set("Cache-Control", "no-store");
         if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { ex.sendResponseHeaders(204, -1); ex.close(); return; }
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { send(ex, 405, "{\"error\":\"method_not_allowed\"}"); return; }
-        if (cameras) {
-            send(ex, 200, "{\"integration\":\"not_connected\",\"cameras\":[],\"message\":\"No live camera provider is connected. No placeholder streams are shown.\"}");
-            return;
-        }
         try {
-            var snapshot = Bukkit.getScheduler().callSyncMethod(this, this::statusJson).get(3, TimeUnit.SECONDS);
+            String snapshot = Bukkit.getScheduler().callSyncMethod(this,
+                cameras ? this::camerasJson : this::statusJson).get(3, TimeUnit.SECONDS);
             send(ex, 200, snapshot);
         } catch (Exception e) {
+            getLogger().warning("Could not create API snapshot: " + e.getMessage());
             send(ex, 503, "{\"error\":\"server_snapshot_unavailable\"}");
+        }
+    }
+
+    private String camerasJson() {
+        Plugin securityCams = Bukkit.getPluginManager().getPlugin("SecurityCams");
+        if (securityCams == null || !securityCams.isEnabled()) {
+            return "{\"integration\":\"not_installed\",\"liveViewAvailable\":false,\"cameras\":[],"
+                + "\"message\":\"SecurityCams is not installed or not enabled.\"}";
+        }
+        try {
+            ClassLoader loader = securityCams.getClass().getClassLoader();
+            Class<?> storage = Class.forName("me.skilleeed.securitycams.models.CamStorage", true, loader);
+            Method getAllCams = storage.getMethod("getAllCams");
+            Method getOwnerName = storage.getMethod("getOwnerName", UUID.class);
+            List<?> ownedCams = (List<?>) getAllCams.invoke(null);
+            StringBuilder items = new StringBuilder("[");
+            boolean first = true;
+            for (Object owned : ownedCams) {
+                Object cam = owned.getClass().getMethod("cam").invoke(owned);
+                UUID owner = (UUID) owned.getClass().getMethod("owner").invoke(owned);
+                int id = (Integer) cam.getClass().getMethod("getId").invoke(cam);
+                String name = (String) cam.getClass().getMethod("getDisplayName").invoke(cam);
+                Object camLocation = cam.getClass().getMethod("getCamLocation").invoke(cam);
+                String world = (String) camLocation.getClass().getMethod("world").invoke(camLocation);
+                String ownerName = (String) getOwnerName.invoke(null, owner);
+                if (!first) items.append(',');
+                first = false;
+                items.append("{\"id\":").append(id)
+                    .append(",\"name\":\"").append(escape(name == null ? "Kamera " + id : name)).append("\"")
+                    .append(",\"owner\":\"").append(escape(ownerName == null ? "Unbekannt" : ownerName)).append("\"")
+                    .append(",\"world\":\"").append(escape(world == null ? "" : world)).append("\"}");
+            }
+            items.append(']');
+            return "{\"integration\":\"securitycams\",\"liveViewAvailable\":false,"
+                + "\"cameraCount\":" + ownedCams.size() + ",\"cameras\":" + items
+                + ",\"message\":\"Kameraliste verbunden. SecurityCams 3.1.0 stellt keinen Browser-Livestream bereit.\"}";
+        } catch (ReflectiveOperationException | ClassCastException e) {
+            getLogger().warning("SecurityCams metadata adapter failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return "{\"integration\":\"error\",\"liveViewAvailable\":false,\"cameras\":[],"
+                + "\"message\":\"SecurityCams wurde erkannt, aber die Kameradaten konnten nicht gelesen werden.\"}";
         }
     }
 
@@ -88,7 +130,7 @@ public final class WetterPlugin extends JavaPlugin {
 
     private static String escape(String s) {
         return s.replace("\\\\", "\\\\\\\\").replace("\"", "\\\"")
-            .replace("\n", "\\n").replace("\r", "\\r");
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
 
     private static void send(HttpExchange ex, int status, String body) throws IOException {
