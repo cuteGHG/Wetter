@@ -1,7 +1,16 @@
 name: Wetter
-version: 0.2.0
+version: 0.3.0
 main: de.cuteghg.wetter.WetterPlugin
 api-version: '26.3'
-description: Read-only public server status and SecurityCams camera metadata API.
+description: Ingame server overview and public SecurityCams camera GUI.
 author: cuteGHG
 softdepend: [SecurityCams]
+commands:
+  wetter:
+    description: Opens the Wetter GUI or manages public cameras.
+    usage: /wetter [add|remove|list|reload|help]
+    aliases: [w]
+permissions:
+  wetter.admin:
+    description: Manage the public camera list.
+    default: op
