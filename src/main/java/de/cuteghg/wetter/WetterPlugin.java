@@ -10,6 +10,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
@@ -19,16 +20,12 @@ import java.util.concurrent.TimeUnit;
 
 public final class WetterPlugin extends JavaPlugin {
     private HttpServer http;
-
     @Override public void onEnable() {
         saveDefaultConfig();
         if (getConfig().getBoolean("http.enabled", true)) startHttp();
         getLogger().info("Wetter dashboard bridge enabled.");
     }
-
-    @Override public void onDisable() {
-        if (http != null) http.stop(1);
-    }
+    @Override public void onDisable() { if (http != null) http.stop(1); }
 
     private void startHttp() {
         try {
@@ -38,18 +35,15 @@ public final class WetterPlugin extends JavaPlugin {
             http.setExecutor(Executors.newFixedThreadPool(4, r -> {
                 Thread t = new Thread(r, "Wetter-HTTP"); t.setDaemon(true); return t;
             }));
-            http.createContext("/api/status", exchange -> handle(exchange, false));
-            http.createContext("/api/cameras", exchange -> handle(exchange, true));
+            http.createContext("/api/status", ex -> handle(ex, false));
+            http.createContext("/api/cameras", ex -> handle(ex, true));
             http.start();
             getLogger().info("Read-only API listening on " + host + ":" + port);
-        } catch (IOException e) {
-            getLogger().severe("Could not start dashboard API: " + e.getMessage());
-        }
+        } catch (IOException e) { getLogger().severe("Could not start dashboard API: " + e.getMessage()); }
     }
 
     private void handle(HttpExchange ex, boolean cameras) throws IOException {
-        String origin = getConfig().getString("http.allowed-origin", "*");
-        ex.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
+        ex.getResponseHeaders().set("Access-Control-Allow-Origin", getConfig().getString("http.allowed-origin", "*"));
         ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, OPTIONS");
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
         ex.getResponseHeaders().set("Cache-Control", "no-store");
@@ -78,26 +72,30 @@ public final class WetterPlugin extends JavaPlugin {
             Method getOwnerName = storage.getMethod("getOwnerName", UUID.class);
             List<?> ownedCams = (List<?>) getAllCams.invoke(null);
             StringBuilder items = new StringBuilder("[");
-            boolean first = true;
+            boolean first = true, anyStream = false;
             for (Object owned : ownedCams) {
                 Object cam = owned.getClass().getMethod("cam").invoke(owned);
                 UUID owner = (UUID) owned.getClass().getMethod("owner").invoke(owned);
                 int id = (Integer) cam.getClass().getMethod("getId").invoke(cam);
                 String name = (String) cam.getClass().getMethod("getDisplayName").invoke(cam);
-                Object camLocation = cam.getClass().getMethod("getCamLocation").invoke(cam);
-                String world = (String) camLocation.getClass().getMethod("world").invoke(camLocation);
+                Object loc = cam.getClass().getMethod("getCamLocation").invoke(cam);
+                String world = (String) loc.getClass().getMethod("world").invoke(loc);
                 String ownerName = (String) getOwnerName.invoke(null, owner);
+                String streamUrl = configuredHttpsStream(id);
+                if (!streamUrl.isEmpty()) anyStream = true;
                 if (!first) items.append(',');
                 first = false;
                 items.append("{\"id\":").append(id)
                     .append(",\"name\":\"").append(escape(name == null ? "Kamera " + id : name)).append("\"")
                     .append(",\"owner\":\"").append(escape(ownerName == null ? "Unbekannt" : ownerName)).append("\"")
-                    .append(",\"world\":\"").append(escape(world == null ? "" : world)).append("\"}");
+                    .append(",\"world\":\"").append(escape(world == null ? "" : world)).append("\"");
+                if (!streamUrl.isEmpty()) items.append(",\"streamUrl\":\"").append(escape(streamUrl)).append("\"");
+                items.append('}');
             }
             items.append(']');
-            return "{\"integration\":\"securitycams\",\"liveViewAvailable\":false,"
-                + "\"cameraCount\":" + ownedCams.size() + ",\"cameras\":" + items
-                + ",\"message\":\"Kameraliste verbunden. SecurityCams 3.1.0 stellt keinen Browser-Livestream bereit.\"}";
+            return "{\"integration\":\"securitycams\",\"liveViewAvailable\":" + anyStream
+                + ",\"cameraCount\":" + ownedCams.size() + ",\"cameras\":" + items
+                + ",\"message\":\"Kameraliste verbunden. Streams können optional pro Kamera konfiguriert werden.\"}";
         } catch (ReflectiveOperationException | ClassCastException e) {
             getLogger().warning("SecurityCams metadata adapter failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             return "{\"integration\":\"error\",\"liveViewAvailable\":false,\"cameras\":[],"
@@ -105,19 +103,29 @@ public final class WetterPlugin extends JavaPlugin {
         }
     }
 
+    private String configuredHttpsStream(int cameraId) {
+        String value = getConfig().getString("camera-streams." + cameraId, "");
+        if (value == null || value.isBlank()) return "";
+        try {
+            URI uri = URI.create(value.trim());
+            if ("https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null && uri.getUserInfo() == null)
+                return uri.toString();
+        } catch (IllegalArgumentException ignored) { }
+        getLogger().warning("Ignoring invalid/non-HTTPS stream URL for SecurityCams camera " + cameraId);
+        return "";
+    }
+
     private String statusJson() {
-        int online = Bukkit.getOnlinePlayers().size();
-        int max = Bukkit.getMaxPlayers();
+        int online = Bukkit.getOnlinePlayers().size(), max = Bukkit.getMaxPlayers();
         StringBuilder worlds = new StringBuilder("[");
         boolean first = true;
         for (World w : Bukkit.getWorlds()) {
             if (!first) worlds.append(',');
             first = false;
-            long ticks = w.getTime();
             String weather = w.isThundering() ? "thunder" : w.hasStorm() ? "rain" : "clear";
             worlds.append("{\"name\":\"").append(escape(w.getName())).append("\",")
                 .append("\"weather\":\"").append(weather).append("\",")
-                .append("\"timeTicks\":").append(ticks).append(',')
+                .append("\"timeTicks\":").append(w.getTime()).append(',')
                 .append("\"fullTime\":").append(w.getFullTime()).append('}');
         }
         worlds.append(']');
@@ -132,7 +140,6 @@ public final class WetterPlugin extends JavaPlugin {
         return s.replace("\\\\", "\\\\\\\\").replace("\"", "\\\"")
             .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
-
     private static void send(HttpExchange ex, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
