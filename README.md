@@ -1,43 +1,26 @@
-# Wetter — Minecraft Server Dashboard
+# Wetter — Ingame-Dashboard
 
-Read-only Paper plugin and static public dashboard. The plugin reads real camera metadata from SecurityCams v3 and can optionally embed an externally produced browser-playable video stream for each camera.
+Wetter is a Paper plugin with an inventory GUI. No website or HTTP API is required.
 
 ## Requirements
 - Paper 26.3
 - Java 25
-- Maven 3.9+
-- SecurityCams v3 (optional, for camera metadata)
+- SecurityCams 3.x for camera integration
+
+## Commands
+- `/wetter` — open the GUI (online players, current world weather and world clock, public cameras)
+- `/wetter add <Kameraname>` — admin: publish an existing SecurityCams camera by its exact display name (case-insensitive)
+- `/wetter remove <Kameraname>` — admin: remove it from the public list
+- `/wetter list` — admin: list public cameras
+- `/wetter reload` — admin: reload config
+- `/wetter help` — show commands
+
+Admin commands require `wetter.admin` (default: op). Public cameras are saved in `plugins/Wetter/config.yml`.
+
+## Camera viewing
+When a player clicks a published camera, Wetter calls SecurityCams 3.x's own `PlayerCamsManager.connectToCam` integration. It temporarily grants the SecurityCams permission needed to view that published camera, then removes the temporary permission. SecurityCams remains responsible for the actual in-game camera session and its normal cleanup.
 
 ## Build
-```bash
-mvn clean package
-```
-The JAR is written to `target/wetter-0.2.0.jar`. Copy it into Paper's `plugins/` directory and restart. Install SecurityCams separately as usual.
+`mvn clean package` creates `target/wetter-0.3.0.jar`. Install the JAR in `plugins/` beside SecurityCams and restart the server.
 
-## Camera integration
-`GET /api/cameras` reads SecurityCams' actual internal `CamStorage` list using a soft dependency and reflection. It returns each camera's ID, name, owner and world. It does not expose exact block coordinates or provide camera-control endpoints.
-
-### Important: SecurityCams does not output browser video
-SecurityCams' documented live mode moves a Minecraft player into a camera view inside the Minecraft client. It does not document an HTTP, RTSP, HLS, WebRTC or browser-video output. The plugin therefore cannot directly supply a website video.
-
-For website live video, a separate capture pipeline is required:
-1. Run a dedicated Minecraft client/account that can watch the relevant SecurityCams camera.
-2. Capture that client window with OBS (or equivalent) and publish a browser-compatible stream (HLS or MP4/WebM; WebRTC needs a compatible player integration).
-3. Add the public HTTPS stream URL to `plugins/Wetter/config.yml` under `camera-streams`, keyed by the SecurityCams camera ID, for example:
-   ```yaml
-   camera-streams:
-     "1": "https://stream.example.net/camera-1/index.m3u8"
-   ```
-4. Restart Wetter and host the website files. The dashboard will display a player only for cameras with a configured HTTPS URL.
-
-The URL is public because visitors to a public website can inspect it. Do not put private stream credentials or OBS control tokens in this setting. Protect the stream separately at your streaming server/CDN if needed. HLS playback uses hls.js from jsDelivr where the browser lacks native HLS support.
-
-## API and hosting
-Default API bind: `127.0.0.1:8765`.
-- `GET /api/status`: player count, MOTD, server version, world weather and time.
-- `GET /api/cameras`: SecurityCams camera metadata and optional configured HTTPS stream URLs.
-
-Host `website/` as static files. Keep port 8765 private. Put the API behind an HTTPS reverse proxy, restrict it to GET/OPTIONS, and rate-limit it. Set `window.WETTER_API_BASE` in `website/config.js` if the API is on another origin.
-
-## Status
-The SecurityCams metadata adapter and optional external-stream display are implemented in source. This has not yet been compiled or tested against your live Paper/SecurityCams installation, and no video capture process is included: the external viewer + OBS stream must be set up separately.
+The integration uses reflection against SecurityCams 3.x internals and therefore must be verified on the target server build before production use.
