@@ -1,0 +1,7 @@
+# Public read-only HTTP API. Use a reverse proxy with HTTPS in production.
+http:
+  enabled: true
+  host: 127.0.0.1
+  port: 8765
+  allowed-origin: "*"
+  # Public endpoints expose online count, world weather/time and camera integration status only.
