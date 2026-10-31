@@ -1,13 +1,2 @@
-# Public read-only HTTP API. Keep it bound to localhost behind an HTTPS reverse proxy.
-http:
-  enabled: true
-  host: 127.0.0.1
-  port: 8765
-  allowed-origin: "*"
-
-# Optional browser-playable HTTPS streams keyed by SecurityCams camera ID.
-# SecurityCams itself does NOT produce these URLs. Supply them from a separate
-# capture/stream pipeline (for example a dedicated Minecraft viewer + OBS).
-# HLS (.m3u8) and browser-supported MP4/WebM URLs can be used.
-camera-streams:
-  # "1": "https://stream.example.net/camera-1/index.m3u8"
+# Cameras added by admins with /wetter add <Kameraname> are stored here.
+cameras: {}
