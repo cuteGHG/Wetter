@@ -1,149 +1,234 @@
 package de.cuteghg.wetter;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.command.*;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.inventory.*;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.io.IOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.text.DecimalFormat;
+import java.util.*;
 
-public final class WetterPlugin extends JavaPlugin {
-    private HttpServer http;
+public final class WetterPlugin extends JavaPlugin implements Listener, TabCompleter {
+    private static final String PREFIX = ChatColor.AQUA + "Wetter " + ChatColor.DARK_GRAY + "» " + ChatColor.GRAY;
+    private static final int[] CAMERA_SLOTS = {19,20,21,22,23,24,25,28,29,30,31,32,33,34,37,38,39,40,41,42,43,46,47,48,49,50,51,52};
+    private final Map<UUID, Map<Integer, CameraEntry>> openMenus = new HashMap<>();
+
     @Override public void onEnable() {
         saveDefaultConfig();
-        if (getConfig().getBoolean("http.enabled", true)) startHttp();
-        getLogger().info("Wetter dashboard bridge enabled.");
-    }
-    @Override public void onDisable() { if (http != null) http.stop(1); }
-
-    private void startHttp() {
-        try {
-            String host = getConfig().getString("http.host", "127.0.0.1");
-            int port = getConfig().getInt("http.port", 8765);
-            http = HttpServer.create(new InetSocketAddress(host, port), 32);
-            http.setExecutor(Executors.newFixedThreadPool(4, r -> {
-                Thread t = new Thread(r, "Wetter-HTTP"); t.setDaemon(true); return t;
-            }));
-            http.createContext("/api/status", ex -> handle(ex, false));
-            http.createContext("/api/cameras", ex -> handle(ex, true));
-            http.start();
-            getLogger().info("Read-only API listening on " + host + ":" + port);
-        } catch (IOException e) { getLogger().severe("Could not start dashboard API: " + e.getMessage()); }
+        Objects.requireNonNull(getCommand("wetter")).setExecutor(this::onCommand);
+        Objects.requireNonNull(getCommand("wetter")).setTabCompleter(this);
+        Bukkit.getPluginManager().registerEvents(this, this);
+        getLogger().info("Wetter Ingame-GUI aktiviert.");
     }
 
-    private void handle(HttpExchange ex, boolean cameras) throws IOException {
-        ex.getResponseHeaders().set("Access-Control-Allow-Origin", getConfig().getString("http.allowed-origin", "*"));
-        ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, OPTIONS");
-        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
-        ex.getResponseHeaders().set("Cache-Control", "no-store");
-        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { ex.sendResponseHeaders(204, -1); ex.close(); return; }
-        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { send(ex, 405, "{\"error\":\"method_not_allowed\"}"); return; }
-        try {
-            String snapshot = Bukkit.getScheduler().callSyncMethod(this,
-                cameras ? this::camerasJson : this::statusJson).get(3, TimeUnit.SECONDS);
-            send(ex, 200, snapshot);
-        } catch (Exception e) {
-            getLogger().warning("Could not create API snapshot: " + e.getMessage());
-            send(ex, 503, "{\"error\":\"server_snapshot_unavailable\"}");
+    @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length == 0) {
+            if (!(sender instanceof Player player)) { sender.sendMessage(PREFIX + "Nur Spieler können die GUI öffnen."); return true; }
+            openMenu(player, 0);
+            return true;
         }
+        if (!sender.hasPermission("wetter.admin")) { sender.sendMessage(PREFIX + "Dafür hast du keine Rechte."); return true; }
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        if (sub.equals("help")) {
+            sender.sendMessage(ChatColor.AQUA + "Wetter-Befehle:");
+            sender.sendMessage(ChatColor.GRAY + "/wetter " + ChatColor.WHITE + "GUI öffnen");
+            sender.sendMessage(ChatColor.GRAY + "/wetter add <Kameraname> " + ChatColor.WHITE + "Kamera öffentlich hinzufügen");
+            sender.sendMessage(ChatColor.GRAY + "/wetter remove <Kameraname> " + ChatColor.WHITE + "Öffentliche Kamera entfernen");
+            sender.sendMessage(ChatColor.GRAY + "/wetter list " + ChatColor.WHITE + "Öffentliche Kameras anzeigen");
+            sender.sendMessage(ChatColor.GRAY + "/wetter reload " + ChatColor.WHITE + "Konfiguration neu laden");
+            return true;
+        }
+        if (sub.equals("reload")) { reloadConfig(); sender.sendMessage(PREFIX + "Konfiguration neu geladen."); return true; }
+        if (sub.equals("list")) {
+            List<CameraEntry> entries = cameras();
+            sender.sendMessage(PREFIX + "Öffentliche Kameras (" + entries.size() + "):");
+            for (CameraEntry entry : entries) sender.sendMessage(ChatColor.GRAY + "• " + ChatColor.WHITE + entry.name + ChatColor.DARK_GRAY + " (" + entry.world + ")");
+            return true;
+        }
+        if ((sub.equals("add") || sub.equals("remove")) && args.length >= 2) {
+            String name = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim();
+            if (sub.equals("add")) addCamera(sender, name); else removeCamera(sender, name);
+            return true;
+        }
+        sender.sendMessage(PREFIX + "Nutze /wetter help für alle Befehle.");
+        return true;
     }
 
-    private String camerasJson() {
-        Plugin securityCams = Bukkit.getPluginManager().getPlugin("SecurityCams");
-        if (securityCams == null || !securityCams.isEnabled()) {
-            return "{\"integration\":\"not_installed\",\"liveViewAvailable\":false,\"cameras\":[],"
-                + "\"message\":\"SecurityCams is not installed or not enabled.\"}";
-        }
+    private void addCamera(CommandSender sender, String name) {
+        if (name.isBlank()) { sender.sendMessage(PREFIX + "Bitte einen Kameranamen angeben."); return; }
+        Plugin sc = Bukkit.getPluginManager().getPlugin("SecurityCams");
+        if (sc == null || !sc.isEnabled()) { sender.sendMessage(PREFIX + "SecurityCams ist nicht installiert oder aktiviert."); return; }
         try {
-            ClassLoader loader = securityCams.getClass().getClassLoader();
-            Class<?> storage = Class.forName("me.skilleeed.securitycams.models.CamStorage", true, loader);
-            Method getAllCams = storage.getMethod("getAllCams");
-            Method getOwnerName = storage.getMethod("getOwnerName", UUID.class);
-            List<?> ownedCams = (List<?>) getAllCams.invoke(null);
-            StringBuilder items = new StringBuilder("[");
-            boolean first = true, anyStream = false;
-            for (Object owned : ownedCams) {
+            Class<?> storage = Class.forName("me.skilleeed.securitycams.models.CamStorage", true, sc.getClass().getClassLoader());
+            List<?> all = (List<?>) storage.getMethod("getAllCams").invoke(null);
+            for (Object owned : all) {
                 Object cam = owned.getClass().getMethod("cam").invoke(owned);
                 UUID owner = (UUID) owned.getClass().getMethod("owner").invoke(owned);
-                int id = (Integer) cam.getClass().getMethod("getId").invoke(cam);
-                String name = (String) cam.getClass().getMethod("getDisplayName").invoke(cam);
-                Object loc = cam.getClass().getMethod("getCamLocation").invoke(cam);
-                String world = (String) loc.getClass().getMethod("world").invoke(loc);
-                String ownerName = (String) getOwnerName.invoke(null, owner);
-                String streamUrl = configuredHttpsStream(id);
-                if (!streamUrl.isEmpty()) anyStream = true;
-                if (!first) items.append(',');
-                first = false;
-                items.append("{\"id\":").append(id)
-                    .append(",\"name\":\"").append(escape(name == null ? "Kamera " + id : name)).append("\"")
-                    .append(",\"owner\":\"").append(escape(ownerName == null ? "Unbekannt" : ownerName)).append("\"")
-                    .append(",\"world\":\"").append(escape(world == null ? "" : world)).append("\"");
-                if (!streamUrl.isEmpty()) items.append(",\"streamUrl\":\"").append(escape(streamUrl)).append("\"");
-                items.append('}');
+                String actual = (String) cam.getClass().getMethod("getDisplayName").invoke(cam);
+                if (actual != null && actual.equalsIgnoreCase(name)) {
+                    int id = (Integer) cam.getClass().getMethod("getId").invoke(cam);
+                    Object loc = cam.getClass().getMethod("getCamLocation").invoke(cam);
+                    String world = String.valueOf(loc.getClass().getMethod("world").invoke(loc));
+                    String key = owner + "_" + id;
+                    if (getConfig().contains("cameras." + key)) { sender.sendMessage(PREFIX + "Diese Kamera ist bereits öffentlich."); return; }
+                    getConfig().set("cameras." + key + ".owner", owner.toString());
+                    getConfig().set("cameras." + key + ".id", id);
+                    getConfig().set("cameras." + key + ".name", actual);
+                    getConfig().set("cameras." + key + ".world", world);
+                    saveConfig();
+                    sender.sendMessage(PREFIX + ChatColor.GREEN + actual + ChatColor.GRAY + " ist jetzt öffentlich.");
+                    refreshOpenMenus();
+                    return;
+                }
             }
-            items.append(']');
-            return "{\"integration\":\"securitycams\",\"liveViewAvailable\":" + anyStream
-                + ",\"cameraCount\":" + ownedCams.size() + ",\"cameras\":" + items
-                + ",\"message\":\"Kameraliste verbunden. Streams können optional pro Kamera konfiguriert werden.\"}";
-        } catch (ReflectiveOperationException | ClassCastException e) {
-            getLogger().warning("SecurityCams metadata adapter failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            return "{\"integration\":\"error\",\"liveViewAvailable\":false,\"cameras\":[],"
-                + "\"message\":\"SecurityCams wurde erkannt, aber die Kameradaten konnten nicht gelesen werden.\"}";
+            sender.sendMessage(PREFIX + "Keine SecurityCams-Kamera mit dem Namen '" + name + "' gefunden.");
+        } catch (ReflectiveOperationException | ClassCastException ex) {
+            getLogger().warning("SecurityCams camera lookup failed: " + ex);
+            sender.sendMessage(PREFIX + "Kameradaten konnten nicht aus SecurityCams gelesen werden.");
         }
     }
 
-    private String configuredHttpsStream(int cameraId) {
-        String value = getConfig().getString("camera-streams." + cameraId, "");
-        if (value == null || value.isBlank()) return "";
+    private void removeCamera(CommandSender sender, String name) {
+        String matched = null;
+        for (String key : getConfig().getConfigurationSection("cameras") == null ? Set.<String>of() : getConfig().getConfigurationSection("cameras").getKeys(false)) {
+            if (getConfig().getString("cameras." + key + ".name", "").equalsIgnoreCase(name)) { matched = key; break; }
+        }
+        if (matched == null) { sender.sendMessage(PREFIX + "Diese Kamera ist nicht in der öffentlichen Liste."); return; }
+        getConfig().set("cameras." + matched, null);
+        saveConfig();
+        sender.sendMessage(PREFIX + ChatColor.GREEN + name + ChatColor.GRAY + " wurde aus der öffentlichen Liste entfernt.");
+        refreshOpenMenus();
+    }
+
+    private List<CameraEntry> cameras() {
+        List<CameraEntry> result = new ArrayList<>();
+        if (getConfig().getConfigurationSection("cameras") == null) return result;
+        for (String key : getConfig().getConfigurationSection("cameras").getKeys(false)) {
+            String owner = getConfig().getString("cameras." + key + ".owner", "");
+            String name = getConfig().getString("cameras." + key + ".name", "Kamera");
+            String world = getConfig().getString("cameras." + key + ".world", "Unbekannt");
+            int id = getConfig().getInt("cameras." + key + ".id", -1);
+            try { result.add(new CameraEntry(UUID.fromString(owner), id, name, world)); } catch (IllegalArgumentException ignored) { }
+        }
+        result.sort(Comparator.comparing(e -> e.name.toLowerCase(Locale.ROOT)));
+        return result;
+    }
+
+    private void openMenu(Player player, int page) {
+        List<CameraEntry> all = cameras();
+        int maxPage = Math.max(0, (all.size() - 1) / CAMERA_SLOTS.length);
+        page = Math.max(0, Math.min(page, maxPage));
+        WetterHolder holder = new WetterHolder(page);
+        Inventory inv = Bukkit.createInventory(holder, 54, ChatColor.DARK_AQUA + "" + ChatColor.BOLD + "Wetter " + ChatColor.DARK_GRAY + "• " + ChatColor.GRAY + "Übersicht");
+        holder.inventory = inv;
+        ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, " ", List.of());
+        for (int i = 0; i < 54; i++) inv.setItem(i, filler);
+
+        inv.setItem(4, item(Material.COMPASS, ChatColor.AQUA + "" + ChatColor.BOLD + "SERVERÜBERSICHT",
+            List.of(ChatColor.GRAY + "Spieler: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size() + "/" + Bukkit.getMaxPlayers(),
+                    ChatColor.GRAY + "Welt: " + ChatColor.WHITE + (player.getWorld() == null ? "—" : player.getWorld().getName()),
+                    ChatColor.DARK_GRAY + "Aktualisiert beim Öffnen")));
+        World world = player.getWorld();
+        String weather = world.hasStorm() ? (world.isThundering() ? "Gewitter" : "Regen") : "Klar";
+        Material weatherIcon = world.isThundering() ? Material.LIGHTNING_ROD : world.hasStorm() ? Material.WATER_BUCKET : Material.SUNFLOWER;
+        inv.setItem(11, item(weatherIcon, ChatColor.YELLOW + "WETTER",
+            List.of(ChatColor.GRAY + "Aktuell: " + ChatColor.WHITE + weather)));
+        long ticks = (world.getTime() + 6000L) % 24000L;
+        int hour = (int)(ticks / 1000L), minute = (int)((ticks % 1000L) * 60L / 1000L);
+        inv.setItem(13, item(Material.CLOCK, ChatColor.GOLD + "UHRZEIT",
+            List.of(ChatColor.GRAY + "Weltzeit: " + ChatColor.WHITE + String.format("%02d:%02d", hour, minute))));
+        inv.setItem(15, item(Material.PLAYER_HEAD, ChatColor.GREEN + "ONLINE-SPIELER",
+            List.of(ChatColor.GRAY + "Gerade online: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size())));
+        inv.setItem(17, item(Material.CHEST, ChatColor.AQUA + "ÖFFENTLICHE KAMERAS",
+            List.of(ChatColor.GRAY + "Verfügbar: " + ChatColor.WHITE + all.size())));
+        Map<Integer, CameraEntry> slots = new HashMap<>();
+        int start = page * CAMERA_SLOTS.length;
+        for (int i = 0; i < CAMERA_SLOTS.length && start + i < all.size(); i++) {
+            CameraEntry entry = all.get(start + i);
+            int slot = CAMERA_SLOTS[i];
+            inv.setItem(slot, item(Material.ENDER_EYE, ChatColor.AQUA + "" + ChatColor.BOLD + entry.name,
+                List.of(ChatColor.GRAY + "Welt: " + ChatColor.WHITE + entry.world,
+                        ChatColor.GRAY + "Status: " + ChatColor.GREEN + "Öffentlich",
+                        ChatColor.YELLOW + "Klicken zum Ansehen")));
+            slots.put(slot, entry);
+        }
+        if (page > 0) inv.setItem(45, item(Material.ARROW, ChatColor.YELLOW + "Vorherige Seite", List.of()));
+        if (page < maxPage) inv.setItem(53, item(Material.ARROW, ChatColor.YELLOW + "Nächste Seite", List.of()));
+        inv.setItem(49, item(Material.BARRIER, ChatColor.RED + "Schließen", List.of()));
+        openMenus.put(player.getUniqueId(), slots);
+        player.openInventory(inv);
+    }
+
+    @EventHandler public void onInventoryClick(InventoryClickEvent event) {
+        if (!(event.getView().getTopInventory().getHolder() instanceof WetterHolder holder)) return;
+        event.setCancelled(true);
+        if (!(event.getWhoClicked() instanceof Player player) || event.getClickedInventory() != event.getView().getTopInventory()) return;
+        int slot = event.getRawSlot();
+        if (slot == 49) { player.closeInventory(); return; }
+        if (slot == 45) { openMenu(player, holder.page - 1); return; }
+        if (slot == 53) { openMenu(player, holder.page + 1); return; }
+        CameraEntry entry = openMenus.getOrDefault(player.getUniqueId(), Map.of()).get(slot);
+        if (entry != null) watchCamera(player, entry);
+    }
+
+    private void watchCamera(Player player, CameraEntry entry) {
+        Plugin sc = Bukkit.getPluginManager().getPlugin("SecurityCams");
+        if (sc == null || !sc.isEnabled()) { player.sendMessage(PREFIX + "SecurityCams ist nicht verfügbar."); return; }
         try {
-            URI uri = URI.create(value.trim());
-            if ("https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null && uri.getUserInfo() == null)
-                return uri.toString();
-        } catch (IllegalArgumentException ignored) { }
-        getLogger().warning("Ignoring invalid/non-HTTPS stream URL for SecurityCams camera " + cameraId);
-        return "";
-    }
-
-    private String statusJson() {
-        int online = Bukkit.getOnlinePlayers().size(), max = Bukkit.getMaxPlayers();
-        StringBuilder worlds = new StringBuilder("[");
-        boolean first = true;
-        for (World w : Bukkit.getWorlds()) {
-            if (!first) worlds.append(',');
-            first = false;
-            String weather = w.isThundering() ? "thunder" : w.hasStorm() ? "rain" : "clear";
-            worlds.append("{\"name\":\"").append(escape(w.getName())).append("\",")
-                .append("\"weather\":\"").append(weather).append("\",")
-                .append("\"timeTicks\":").append(w.getTime()).append(',')
-                .append("\"fullTime\":").append(w.getFullTime()).append('}');
+            Field field = sc.getClass().getDeclaredField("playerCamsManager");
+            field.setAccessible(true);
+            Object manager = field.get(sc);
+            Method connect = manager.getClass().getMethod("connectToCam", Player.class, UUID.class, int.class);
+            // SecurityCams checks this permission before moving the player into the selected camera.
+            var attachment = player.addAttachment(this, "securitycams.connectTo.others", true);
+            player.closeInventory();
+            connect.invoke(manager, player, entry.owner, entry.id);
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                try { player.removeAttachment(attachment); } catch (IllegalArgumentException ignored) { }
+            }, 2L);
+        } catch (ReflectiveOperationException ex) {
+            getLogger().warning("Could not open SecurityCams view: " + ex);
+            player.sendMessage(PREFIX + "Die Kameraansicht konnte nicht geöffnet werden. Prüfe die SecurityCams-Version.");
         }
-        worlds.append(']');
-        return "{\"online\":" + online + ",\"maxPlayers\":" + max
-            + ",\"motd\":\"" + escape(Bukkit.getMotd()) + "\""
-            + ",\"serverVersion\":\"" + escape(Bukkit.getVersion()) + "\""
-            + ",\"sampledAt\":\"" + Instant.now() + "\""
-            + ",\"worlds\":" + worlds + "}";
     }
 
-    private static String escape(String s) {
-        return s.replace("\\\\", "\\\\\\\\").replace("\"", "\\\"")
-            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+    private void refreshOpenMenus() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (player.getOpenInventory().getTopInventory().getHolder() instanceof WetterHolder holder) openMenu(player, holder.page);
+        }
     }
-    private static void send(HttpExchange ex, int status, String body) throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
-        ex.sendResponseHeaders(status, bytes.length);
-        try (var out = ex.getResponseBody()) { out.write(bytes); }
+
+    private static ItemStack item(Material material, String name, List<String> lore) {
+        ItemStack stack = new ItemStack(material);
+        ItemMeta meta = stack.getItemMeta();
+        meta.setDisplayName(name);
+        meta.setLore(lore);
+        stack.setItemMeta(meta);
+        return stack;
+    }
+
+    @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (!sender.hasPermission("wetter.admin")) return List.of();
+        if (args.length == 1) return List.of("add", "remove", "list", "reload", "help").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        return List.of();
+    }
+
+    private record CameraEntry(UUID owner, int id, String name, String world) { }
+    private static final class WetterHolder implements InventoryHolder {
+        private final int page;
+        private Inventory inventory;
+        private WetterHolder(int page) { this.page = page; }
+        @Override public Inventory getInventory() { return inventory; }
     }
 }
